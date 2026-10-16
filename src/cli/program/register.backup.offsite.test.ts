@@ -619,4 +619,52 @@ describe("offsite backup CLI", () => {
       ).toEqual([]);
     });
   });
+
+  it("reports fallback-root scratch maintenance warnings in the offsite archive JSON", async () => {
+    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
+      const destination = state.path("offsite");
+      const nestedTmp = state.statePath("tmp");
+      const fallbackRoot = path.dirname(state.stateDir);
+      await fs.mkdir(destination);
+      await fs.mkdir(nestedTmp, { recursive: true });
+      vi.spyOn(os, "tmpdir").mockReturnValue(nestedTmp);
+      vi.spyOn(os, "hostname").mockReturnValue("nested-tmp-host");
+      await state.writeConfig({
+        storage: {
+          locations: {
+            archive: {
+              provider: "filesystem",
+              settings: { path: destination },
+              encryption: { passphrase: "synthetic-backup-test-passphrase" },
+            },
+          },
+        },
+      });
+      const { run } = createCliHarness();
+      await run("storage", "init", "archive");
+
+      // A scratch-named non-directory at the fallback root is preserved with a
+      // warning by maintenance; that warning must reach the JSON result.
+      const stray = path.join(fallbackRoot, "openclaw-backup-strayf");
+      await fs.writeFile(stray, "not a scratch directory");
+      try {
+        const created = (await run(
+          "backup",
+          "create",
+          "--to",
+          "archive",
+          "--namespace",
+          "nested-tmp-host",
+          "--no-include-workspace",
+        )) as OffsiteBackupResult;
+        expect(created).toMatchObject({ verified: true, localArchiveRetained: false });
+        expect(created.warnings).toEqual(
+          expect.arrayContaining([expect.stringContaining(`${stray}: not a directory`)]),
+        );
+        await expect(fs.readFile(stray, "utf8")).resolves.toBe("not a scratch directory");
+      } finally {
+        await fs.rm(stray, { force: true });
+      }
+    });
+  });
 });

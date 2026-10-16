@@ -85,6 +85,7 @@ export async function createOffsiteBackupArchive(
   const location = await openBackupLocation(opts.to, namespace);
   let scratch: BackupScratch | undefined;
   let output: OffsiteBackupResult | undefined;
+  let scratchWarnings: string[] = [];
   try {
     const { chooseBackupTempRoot, createBackupArchive } = await import("../infra/backup-create.js");
     if (opts.dryRun) {
@@ -115,6 +116,7 @@ export async function createOffsiteBackupArchive(
         repair: true,
         log: opts.log,
       });
+      scratchWarnings = maintenance.warnings;
       for (const directory of maintenance.reclaimed) {
         opts.log?.(`Removed abandoned backup scratch: ${directory}`);
       }
@@ -124,6 +126,11 @@ export async function createOffsiteBackupArchive(
       ...opts,
       output: scratch ? path.join(scratch.directory, "archive.tar.gz") : opts.output,
     });
+    if (scratchWarnings.length) {
+      // Fallback-root maintenance warnings belong in the archive JSON alongside
+      // the warnings createBackupArchive reports for its own scratch root.
+      result.warnings = [...scratchWarnings, ...(result.warnings ?? [])];
+    }
     const { verifyBackupArchive } = await import("./backup-verify.js");
     await verifyBackupArchive(result.archivePath);
     result.verified = true;
