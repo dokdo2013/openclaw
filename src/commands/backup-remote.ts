@@ -85,14 +85,19 @@ export async function createOffsiteBackupArchive(
   let scratch: BackupScratch | undefined;
   let output: OffsiteBackupResult | undefined;
   try {
-    const { createBackupArchive } = await import("../infra/backup-create.js");
+    const { chooseBackupTempRoot, createBackupArchive } = await import("../infra/backup-create.js");
     if (opts.dryRun) {
       return await createBackupArchive(opts);
     }
     const { deviceId } = await loadOrCreateProcessDeviceIdentityAsync();
     await claimBackupNamespace(location, namespace, deviceId, opts.claimNamespace === true);
     if (!opts.output) {
-      scratch = await createBackupScratchDirectory(os.tmpdir());
+      // The scratch archive must live outside every backup source; os.tmpdir()
+      // can sit inside the state dir (TMPDIR=~/.openclaw/tmp under the Gateway).
+      const plan = await createBackupArchive({ ...opts, dryRun: true });
+      scratch = await createBackupScratchDirectory(
+        await chooseBackupTempRoot({ assets: plan.assets }),
+      );
     }
     const result = await createBackupArchive({
       ...opts,
