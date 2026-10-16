@@ -16,6 +16,7 @@ import {
 import {
   createBackupScratchDirectory,
   finishBackupScratch,
+  maintainBackupScratch,
   type BackupScratch,
 } from "../infra/backup-scratch.js";
 import { loadOrCreateProcessDeviceIdentityAsync } from "../infra/device-identity-async.js";
@@ -105,9 +106,19 @@ export async function createOffsiteBackupArchive(
         onlyConfig,
         nowMs: opts.nowMs,
       });
-      scratch = await createBackupScratchDirectory(
-        await chooseBackupTempRoot({ assets: plan.included }),
-      );
+      const chosenTempRoot = await chooseBackupTempRoot({ assets: plan.included });
+      // Offsite scratch can land outside os.tmpdir() (parent of a nested TMPDIR
+      // source). Maintain that chosen root before allocating so a later run
+      // reclaims abandoned outer scratch Doctor cannot discover from storage:// URLs.
+      const maintenance = await maintainBackupScratch({
+        roots: [chosenTempRoot],
+        repair: true,
+        log: opts.log,
+      });
+      for (const directory of maintenance.reclaimed) {
+        opts.log?.(`Removed abandoned backup scratch: ${directory}`);
+      }
+      scratch = await createBackupScratchDirectory(chosenTempRoot);
     }
     const result = await createBackupArchive({
       ...opts,

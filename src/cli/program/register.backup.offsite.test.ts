@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { claimBackupNamespace } from "../../commands/backup-namespace.js";
 import type { OffsiteBackupResult } from "../../commands/backup-remote.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { createBackupScratchDirectory, finishBackupScratch } from "../../infra/backup-scratch.js";
 import * as deviceIdentity from "../../infra/device-identity-async.js";
 import { loadDeviceIdentityIfPresentAsync } from "../../infra/device-identity-async.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -550,6 +551,72 @@ describe("offsite backup CLI", () => {
       await expect(
         run("backup", "verify", "latest", "--from", "archive", "--namespace", "nested-tmp-host"),
       ).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  it("reclaims abandoned fallback-root scratch on the next nested-TMPDIR run while preserving active scratch", async () => {
+    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
+      const destination = state.path("offsite");
+      const nestedTmp = state.statePath("tmp");
+      // With TMPDIR nested inside state, offsite scratch falls back to the
+      // parent of the state source. Doctor scans TMPDIR and recorded archive
+      // parents only, so the next offsite run must maintain this root itself.
+      const fallbackRoot = path.dirname(state.stateDir);
+      await fs.mkdir(destination);
+      await fs.mkdir(nestedTmp, { recursive: true });
+      vi.spyOn(os, "tmpdir").mockReturnValue(nestedTmp);
+      vi.spyOn(os, "hostname").mockReturnValue("nested-tmp-host");
+      await state.writeConfig({
+        storage: {
+          locations: {
+            archive: {
+              provider: "filesystem",
+              settings: { path: destination },
+              encryption: { passphrase: "synthetic-backup-test-passphrase" },
+            },
+          },
+        },
+      });
+      const { run } = createCliHarness();
+      await run("storage", "init", "archive");
+
+      // A hard-killed earlier upload leaves its plaintext scratch archive behind
+      // with no live lifetime token; a concurrent run still holds its token.
+      const abandoned = await createBackupScratchDirectory(fallbackRoot);
+      const active = await createBackupScratchDirectory(fallbackRoot);
+      for (const scratch of [abandoned, active]) {
+        await fs.writeFile(path.join(scratch.directory, "archive.tar.gz"), "synthetic archive");
+      }
+      abandoned.release();
+      try {
+        const created = (await run(
+          "backup",
+          "create",
+          "--to",
+          "archive",
+          "--namespace",
+          "nested-tmp-host",
+          "--no-include-workspace",
+        )) as OffsiteBackupResult;
+        expect(created).toMatchObject({ verified: true, localArchiveRetained: false });
+
+        await expect(fs.stat(abandoned.directory)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(
+          fs.readFile(path.join(active.directory, "archive.tar.gz"), "utf8"),
+        ).resolves.toBe("synthetic archive");
+        // The run's own scratch is retired; only the active directory remains.
+        expect(
+          (await fs.readdir(fallbackRoot)).filter((name) => name.startsWith("openclaw-backup-")),
+        ).toEqual([path.basename(active.directory)]);
+        expect(
+          (await fs.readdir(nestedTmp)).filter((name) => name.startsWith("openclaw-backup-")),
+        ).toEqual([]);
+      } finally {
+        await expect(finishBackupScratch(active, () => {})).resolves.toBeUndefined();
+      }
+      expect(
+        (await fs.readdir(fallbackRoot)).filter((name) => name.startsWith("openclaw-backup-")),
+      ).toEqual([]);
     });
   });
 });
