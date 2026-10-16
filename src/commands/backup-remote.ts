@@ -94,9 +94,19 @@ export async function createOffsiteBackupArchive(
     if (!opts.output) {
       // The scratch archive must live outside every backup source; os.tmpdir()
       // can sit inside the state dir (TMPDIR=~/.openclaw/tmp under the Gateway).
-      const plan = await createBackupArchive({ ...opts, dryRun: true });
+      // Discover sources only — do not dry-run createBackupArchive here, because
+      // that validates an unused local default output and can reject previously
+      // working layouts (home=workspace=cwd with a safe TMPDIR).
+      const { resolveBackupPlanFromDisk } = await import("./backup-shared.js");
+      const onlyConfig = Boolean(opts.onlyConfig);
+      const includeWorkspace = onlyConfig ? false : (opts.includeWorkspace ?? true);
+      const plan = await resolveBackupPlanFromDisk({
+        includeWorkspace,
+        onlyConfig,
+        nowMs: opts.nowMs,
+      });
       scratch = await createBackupScratchDirectory(
-        await chooseBackupTempRoot({ assets: plan.assets }),
+        await chooseBackupTempRoot({ assets: plan.included }),
       );
     }
     const result = await createBackupArchive({

@@ -481,4 +481,75 @@ describe("offsite backup CLI", () => {
       }
     });
   });
+
+  it("creates, verifies, uploads and cleans scratch when TMPDIR is nested inside state", async () => {
+    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
+      const destination = state.path("offsite");
+      const nestedTmp = state.statePath("tmp");
+      await fs.mkdir(destination);
+      await fs.mkdir(nestedTmp, { recursive: true });
+      vi.spyOn(os, "tmpdir").mockReturnValue(nestedTmp);
+      vi.spyOn(os, "hostname").mockReturnValue("nested-tmp-host");
+      await state.writeConfig({
+        storage: {
+          locations: {
+            archive: {
+              provider: "filesystem",
+              settings: { path: destination },
+              encryption: { passphrase: "synthetic-backup-test-passphrase" },
+            },
+          },
+        },
+      });
+      await fs.writeFile(state.statePath("operator-note.txt"), "preserved state\n");
+      const { run } = createCliHarness();
+      await run("storage", "init", "archive");
+
+      const created = (await run(
+        "backup",
+        "create",
+        "--to",
+        "archive",
+        "--namespace",
+        "nested-tmp-host",
+        "--no-include-workspace",
+      )) as OffsiteBackupResult;
+
+      expect(created).toMatchObject({
+        verified: true,
+        localArchiveRetained: false,
+        location: {
+          name: "archive",
+          namespace: "nested-tmp-host",
+          key: expect.stringMatching(/\.tar\.gz$/),
+        },
+      });
+      expect(created.archivePath).toMatch(
+        /^storage:\/\/archive\/backups\/nested-tmp-host\/.+\.tar\.gz$/,
+      );
+      // Scratch is staged outside the state source; nested TMPDIR must not keep
+      // openclaw-backup-* scratch dirs (other os.tmpdir() consumers may leave unrelated entries).
+      expect(
+        (await fs.readdir(nestedTmp)).filter((name) => name.startsWith("openclaw-backup-")),
+      ).toEqual([]);
+      const namespaceDir = path.join(destination, "backups", "nested-tmp-host");
+      expect(await fs.readdir(namespaceDir)).toEqual(
+        expect.arrayContaining([created.location!.key, "owner.json"]),
+      );
+      const listed = await run(
+        "backup",
+        "list",
+        "--from",
+        "archive",
+        "--namespace",
+        "nested-tmp-host",
+      );
+      expect(listed).toMatchObject({
+        backups: [{ key: created.location!.key, sizeBytes: created.location!.plaintextBytes }],
+      });
+      await expect(
+        run("backup", "verify", "latest", "--from", "archive", "--namespace", "nested-tmp-host"),
+      ).resolves.toMatchObject({ ok: true });
+    });
+  });
 });
